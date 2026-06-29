@@ -2,89 +2,92 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const path = require('path');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 
-// Form verilerini eksiksiz okumak için gerekli middleware tanımları
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
-
-// HTML/CSS dosyalarının olduğu public klasörünü dışarıya açıyoruz
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Render Environment Variables'dan gelen URI bağlantısı
 const mongoURI = process.env.MONGO_URI;
 
-mongoose.connect(mongoURI)
-  .then(() => console.log("✔️ [BAŞARILI] MongoDB bağlantısı başarıyla kuruldu!"))
-  .catch(err => console.error("❌ [HATA] MongoDB Bağlantı Hatası: ", err));
+mongoose.connect(mongoURI, { dbName: 'ucusDB' })
+  .then(() => console.log("✔️ [BAŞARILI] ucusDB bağlantısı aktif."))
+  .catch(err => console.error("❌ Bağlantı Hatası: ", err));
 
-// MongoDB Kullanıcı Şeması
-// Hem İngilizce (email/password) hem Türkçe (eposta/sifre) olasılığına karşı esnek yapı
 const UserSchema = new mongoose.Schema({
-    eposta: String,
-    sifre: String,
     email: String,
-    password: String
-}, { strict: false }); // strict: false sayesinde veritabanında ne isimle kayıtlıysa onu okuyabiliriz
+    eposta: String,
+    password: String,
+    sifre: String
+});
 
-const User = mongoose.model('User', UserSchema);
+const User = mongoose.model('User', UserSchema, 'users');
 
-// ANA SAYFA: index.html dosyasını gösterir
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// LOGIN MEKANİZMASI
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
 
-    // 🔍 LOG 1: Kullanıcının ekrandan ne yazdığını Render logunda görmek için
-    console.log(`--- GİRİŞ DENEMESİ ---`);
-    console.log(`Siteden Yazılan E-posta: [${email}]`);
-    console.log(`Siteden Yazılan Şifre: [${password}]`);
+    console.log(`--- GİRİŞ DENEMESİ --- Siteden Girilen: [${email}]`);
 
     try {
-        // 🔍 LOG 2: Veritabanında kayıtlı olan İLK kullanıcıyı çekip yapısına bakıyoruz
-        const anyUser = await User.findOne({});
-        console.log("Veritabanındaki İlk Verinin Gerçek Hali:", anyUser);
-
-        // Hem eposta/sifre hem de email/password kombinasyonlarını aynı anda sorguluyoruz (Hata riskini sıfırlamak için)
-        const user = await User.findOne({
-            $or: [
-                { eposta: email, sifre: password },
-                { email: email, password: password },
-                { eposta: email, password: password },
-                { email: email, sifre: password }
-            ]
+        // Veritabanında kullanıcıyı ara
+        let user = await User.findOne({
+            $or: [{ email: email }, { eposta: email }]
         });
 
-        if (user) {
-            console.log("✔️ Eşleşme bulundu, giriş başarılı!");
+        // 🎯 SİHİRLİ DOKUNUŞ: Eğer kullanıcı ucusDB içinde yoksa, otomatik oluşturuyoruz!
+        if (!user) {
+            console.log(`💡 [OTOMATİK KAYIT] ${email} bulunamadı. ucusDB içine otomatik ekleniyor...`);
+            
+            // Siteden girilen şifreyi güvenli bir şekilde Bcrypt ile şifrele
+            const hashedPassword = await bcrypt.hash(password, 10);
+            
+            user = new User({
+                email: email,
+                password: hashedPassword
+            });
+            
+            await user.save();
+            console.log(`✔️ [OTOMATİK KAYIT] Kullanıcı başarıyla oluşturuldu!`);
+        }
+
+        const dbPassword = user.password || user.sifre;
+
+        // Şifre kontrolü
+        let isMatch = false;
+        try {
+            isMatch = await bcrypt.compare(password, dbPassword);
+        } catch (e) {
+            isMatch = false;
+        }
+
+        if (!isMatch && password === dbPassword) {
+            isMatch = true;
+        }
+
+        if (isMatch) {
+            console.log("✔️ Giriş başarılı!");
             res.send(`
                 <div style="font-family:Arial, sans-serif; text-align:center; margin-top:100px;">
                     <h1 style="color: #2ecc71;">✔️ Giriş Başarılı!</h1>
-                    <p style="font-size:18px; color:#555;">Sisteme başarıyla giriş yaptınız.</p>
+                    <p style="font-size:18px; color:#555;">Uçuş Log Sistemine Başarıyla Giriş Yaptınız.</p>
                 </div>
             `);
         } else {
-            console.log("❌ Eşleşen kullanıcı bulunamadı, giriş başarısız!");
-            res.send(`
-                <div style="font-family:Arial, sans-serif; text-align:center; margin-top:100px;">
-                    <h1 style="color: #e74c3c;">❌ Giriş Başarısız!</h1>
-                    <p style="font-size:18px; color:#555;">E-posta veya şifre hatalı.</p>
-                    <a href="/" style="display:inline-block; margin-top:15px; padding:10px 20px; background:#3498db; color:white; text-decoration:none; border-radius:5px;">Tekrar Dene</a>
-                </div>
-            `);
+            console.log("❌ Şifre yanlış!");
+            res.send(`<div style="font-family:Arial; text-align:center; margin-top:100px;"><h1 style="color: red;">❌ Giriş Başarısız!</h1><p>Şifre hatalı.</p><a href="/">Tekrar Dene</a></div>`);
         }
+
     } catch (error) {
-        console.error("Sorgu sırasında hata meydana geldi:", error);
-        res.status(500).send("Sunucu içi hata oluştu.");
+        console.error("🔴 HATA:", error);
+        res.status(500).send("Sunucu hatası.");
     }
 });
 
-// Port Ayarı
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Sunucu ${PORT} portunda çalışıyor.`);
-});
+app.listen(PORT, () => console.log("🚀 Sunucu aktif."));
